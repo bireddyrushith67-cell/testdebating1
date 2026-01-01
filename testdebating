@@ -1,0 +1,184 @@
+import os, sqlite3, random, openai
+from flask import Flask, render_template, request, redirect, session
+
+# ================= CONFIG =================
+API_KEY = "YOUR_OPENAI_API_KEY"  # <-- Replace with your OpenAI API key
+openai.api_key = API_KEY
+
+PROJECT = "AI_FULL_DEBATE"
+TEMPLATES = os.path.join(PROJECT, "templates")
+DB_PATH = os.path.join(PROJECT, "database.db")
+os.makedirs(TEMPLATES, exist_ok=True)
+
+# ================= DATABASE =================
+if not os.path.exists(DB_PATH):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE users (username TEXT PRIMARY KEY, password TEXT, role TEXT, super INTEGER)""")
+    cur.execute("""CREATE TABLE lessons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        level TEXT, title TEXT, content TEXT, video TEXT, worksheet TEXT, background TEXT
+    )""")
+    cur.execute("""CREATE TABLE debate_rooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_name TEXT, room_type TEXT, creator TEXT, motion TEXT
+    )""")
+    # Hidden super user
+    cur.execute("INSERT INTO users VALUES ('rushith','rushith_secret','normal',1)")
+    cur.execute("INSERT INTO users VALUES ('admin','admin123','admin',0)")
+    cur.execute("INSERT INTO users VALUES ('owner','owner123','owner',0)")
+    # Sample lessons
+    sample_lessons = [
+        ("Basic","Debate Basics","Introduction to debating principles.","","", ""),
+        ("Intermediate","Constructing Arguments","How to structure arguments.","","", ""),
+        ("Advanced","Rebuttals & Strategy","Advanced rebuttal techniques.","","", ""),
+    ]
+    for lvl, title, content, video, ws, bg in sample_lessons:
+        cur.execute("INSERT INTO lessons (level,title,content,video,worksheet,background) VALUES (?,?,?,?,?,?)",
+                    (lvl,title,content,video,ws,bg))
+    con.commit(); con.close()
+
+# ================= FLASK APP =================
+app = Flask(__name__, template_folder=TEMPLATES)
+app.secret_key = "super_secret_debate_key"
+
+motions = [
+    "This house would ban social media",
+    "This house supports free college education",
+    "This house believes AI is a threat to humanity",
+    "This house would implement universal basic income",
+    "This house supports nuclear energy"
+]
+
+def get_db(): return sqlite3.connect(DB_PATH)
+
+def ai_generate_background(prompt):
+    try:
+        result = openai.Image.create(prompt=prompt, n=1, size="512x512")
+        return result['data'][0]['url']
+    except:
+        return f"https://picsum.photos/512/512?random={random.randint(1,9999)}"
+
+# ================= ROUTES =================
+@app.route("/", methods=["GET","POST"])
+def login():
+    if request.method=="POST":
+        u=request.form["username"]; p=request.form["password"]
+        con=get_db(); cur=con.cursor()
+        cur.execute("SELECT role,super FROM users WHERE username=? AND password=?",(u,p))
+        user=cur.fetchone(); con.close()
+        if user:
+            session["user"]=u; session["role"]=user[0]; session["super"]=user[1]
+            return redirect("/dashboard")
+    return render_template("login.html")
+
+@app.route("/dashboard")
+def dashboard():
+    user = session.get("user")
+    if not user: return redirect("/")
+    con=get_db(); cur=con.cursor()
+    cur.execute("SELECT * FROM lessons"); lessons=cur.fetchall()
+    cur.execute("SELECT * FROM debate_rooms"); rooms=cur.fetchall(); con.close()
+    return render_template("dashboard.html", role=session["role"], super=session["super"], lessons=lessons, rooms=rooms)
+
+@app.route("/lesson/<int:id>")
+def lesson(id):
+    user = session.get("user")
+    if not user: return redirect("/")
+    con=get_db(); cur=con.cursor()
+    cur.execute("SELECT * FROM lessons WHERE id=?",(id,))
+    lesson=cur.fetchone(); con.close()
+    return render_template("lesson_page.html", lesson=lesson)
+
+@app.route("/add_room", methods=["POST"])
+def add_room():
+    user = session.get("user")
+    if not user: return redirect("/")
+    room_name = request.form["room_name"]
+    room_type = request.form["room_type"]
+    motion_choice = random.choice(motions)
+    con=get_db(); cur=con.cursor()
+    cur.execute("INSERT INTO debate_rooms (room_name,room_type,creator,motion) VALUES (?,?,?,?)",
+                (room_name,room_type,user,motion_choice))
+    con.commit(); con.close()
+    return redirect("/dashboard")
+
+@app.route("/room/<int:id>")
+def room(id):
+    user = session.get("user")
+    if not user: return redirect("/")
+    con=get_db(); cur=con.cursor()
+    cur.execute("SELECT * FROM debate_rooms WHERE id=?",(id,))
+    room=cur.fetchone(); con.close()
+    return render_template("debate_room.html", room=room, user=user)
+
+@app.route("/logout")
+def logout(): session.clear(); return redirect("/")
+
+# ================= TEMPLATES =================
+templates = {
+"login.html": """
+<!DOCTYPE html><html><head><script src='https://cdn.tailwindcss.com'></script></head>
+<body class='bg-gray-100 flex items-center justify-center h-screen'>
+<div class='bg-white p-8 rounded shadow w-96 text-center'>
+<h1 class='text-3xl font-bold mb-4'>AI Debate Platform</h1>
+<form method='post'>
+<input name='username' placeholder='Username' class='w-full p-2 border rounded mb-2'>
+<input name='password' type='password' placeholder='Password' class='w-full p-2 border rounded mb-2'>
+<button class='w-full bg-blue-600 text-white p-2 rounded'>Login</button>
+</form>
+</div></body></html>
+""",
+"dashboard.html": """
+<!DOCTYPE html><html><head><script src='https://cdn.tailwindcss.com'></script></head>
+<body class='bg-gray-100 p-6'>
+<h1 class='text-3xl font-bold'>Dashboard</h1>
+<div class='mt-4 space-x-2'>
+<form method='post' action='/add_room' class='inline-block'>
+<input name='room_name' placeholder='Room Name' class='p-2 border rounded'>
+<select name='room_type'><option>WSDC</option><option>Parliamentary</option><option>Custom</option></select>
+<button class='bg-green-500 text-white px-3 py-2 rounded'>Create Room</button>
+</form>
+<a href='/logout' class='bg-gray-700 text-white px-3 py-2 rounded'>Logout</a>
+</div>
+<h2 class='mt-6 text-xl font-bold'>Lessons</h2>
+<ul>{% for l in lessons %}<li>{{l[2]}} ({{l[1]}})</li>{% endfor %}</ul>
+<h2 class='mt-6 text-xl font-bold'>Debate Rooms</h2>
+<ul>{% for r in rooms %}<li><a href='/room/{{r[0]}}' class='underline text-blue-700'>{{r[1]}} - {{r[2]}} - Motion: {{r[4]}}</a></li>{% endfor %}</ul>
+</body></html>
+""",
+"lesson_page.html": """
+<!DOCTYPE html><html><head><script src='https://cdn.tailwindcss.com'></script></head>
+<body class='bg-gray-100 p-6'>
+<h1 class='text-2xl font-bold'>{{lesson[2]}}</h1>
+<p>Level: {{lesson[1]}}</p>
+<p>{{lesson[3]}}</p>
+</body></html>
+""",
+"debate_room.html": """
+<!DOCTYPE html><html><head><script src='https://cdn.tailwindcss.com'></script></head>
+<body class='bg-gray-100 p-6'>
+<h1 class='text-2xl font-bold'>Room: {{room[1]}} ({{room[2]}})</h1>
+<h2>Motion: {{room[4]}}</h2>
+<p>Creator: {{room[3]}}</p>
+<div class='flex space-x-4 mt-4'>
+<video id='localVideo' autoplay muted class='w-1/2 border'></video>
+<video id='remoteVideo' autoplay class='w-1/2 border'></video>
+</div>
+<script>
+navigator.mediaDevices.getUserMedia({video:true,audio:true}).then(stream=>{
+document.getElementById('localVideo').srcObject=stream;
+// Placeholder for WebRTC peer connections
+});
+</script>
+</body></html>
+"""
+}
+
+for nm, ct in templates.items():
+    with open(os.path.join(TEMPLATES, nm), "w", encoding="utf-8") as f:
+        f.write(ct)
+
+# ================= RUN APP =================
+print(f"✅ AI Full Debate Platform ready in folder {PROJECT}")
+app.run(debug=True)
